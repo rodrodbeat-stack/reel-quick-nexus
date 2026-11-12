@@ -79,6 +79,7 @@ jobs:
       - name: Validate Docker Compose configuration
         run: |
           cp docker/backend.env.example docker/backend.env
+          cp docker/mongo.env.example docker/mongo.env
           docker compose -f docker/docker-compose.yml config --quiet
 
       - name: Commit imported application
