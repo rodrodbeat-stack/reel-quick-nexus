@@ -1,0 +1,18 @@
+pymongo
+fastapi
+python-multipart
+uvicorn
+python-dotenv
+arq
+redis
+moviepy
+langchain-openai
+openai
+httpx
+soundfile
+qwen-tts
+
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch
+torchvision
+torchaudio

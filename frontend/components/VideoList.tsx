@@ -1,0 +1,452 @@
+"use client";
+
+import Link from "next/link";
+import { useCallback, useEffect, useMemo, useState } from "react";
+
+type VideoRecord = {
+  video_id: string;
+  video_title: string;
+  video_size?: number | string | null;
+  video_introduction?: string | null;
+  creation_time?: string;
+  modification_time?: string;
+  active?: boolean;
+  video_tags?: string[];
+  status?: string;
+  output_file_location?: string | null;
+  job_id?: string | null;
+  error_reason?: string | null;
+};
+
+type TextOverlayJobRecord = {
+  video_id: string;
+  status?: string;
+  output_video_path?: string | null;
+  overlay_result_status?: string;
+};
+
+type VideoEnqueueResponse = {
+  detail?: string;
+  message?: string;
+  video?: VideoRecord;
+};
+
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
+
+const formatDateTime = (value?: string) => {
+  if (!value) return "Unknown";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+};
+
+const normalizeStatus = (status?: string) =>
+  (status ?? "created").toLowerCase();
+
+const statusLabel = (status?: string) => {
+  const normalized = normalizeStatus(status);
+  if (normalized === "pending") return "Pending";
+  if (normalized === "queued") return "Queued";
+  if (normalized === "processing") return "Processing";
+  if (normalized === "completed") return "Completed";
+  if (normalized === "failed") return "Failed";
+  if (normalized === "created") return "Created";
+  return normalized.replace(/\b\w/g, (char) => char.toUpperCase());
+};
+
+const statusClass = (status?: string) => {
+  const normalized = normalizeStatus(status);
+  if (normalized === "completed") return "text-status-success";
+  if (normalized === "failed") return "text-status-error";
+  if (normalized === "processing") return "text-status-info";
+  if (normalized === "pending") return "text-status-info";
+  if (normalized === "queued") return "text-status-info";
+  if (normalized === "created") return "text-status-warning";
+  return "text-status-neutral";
+};
+
+const StatusPill = ({ status }: { status?: string }) => (
+  <span
+    className={`neon-badge text-[10px] font-semibold uppercase tracking-[0.25em] ${statusClass(
+      status
+    )}`}
+  >
+    {statusLabel(status)}
+  </span>
+);
+
+const sortByRecent = (items: VideoRecord[]) =>
+  [...items].sort((a, b) => {
+    const aTime = new Date(a.modification_time ?? a.creation_time ?? 0).getTime();
+    const bTime = new Date(b.modification_time ?? b.creation_time ?? 0).getTime();
+    return bTime - aTime;
+  });
+
+const fileNameFromPath = (value: string) => {
+  const normalized = value.replace(/\\/g, "/");
+  const parts = normalized.split("/").filter(Boolean);
+  return parts.at(-1) ?? value;
+};
+
+export default function VideoList() {
+  const [videos, setVideos] = useState<VideoRecord[]>([]);
+  const [textOverlayByVideoId, setTextOverlayByVideoId] = useState<
+    Record<
+      string,
+      {
+        status: string;
+        outputVideoPath: string;
+        overlayResultStatus: string;
+      }
+    >
+  >({});
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<Record<string, boolean>>({});
+  const [retrying, setRetrying] = useState<Record<string, boolean>>({});
+
+  const fetchVideos = useCallback(async () => {
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const response = await fetch(`${API_BASE}/videos`, { cache: "no-store" });
+      if (!response.ok) {
+        throw new Error(`Unable to load videos (${response.status})`);
+      }
+      const data = (await response.json()) as VideoRecord[];
+      setVideos(Array.isArray(data) ? data : []);
+
+      try {
+        const jobsResponse = await fetch(`${API_BASE}/text-overlay-jobs`, {
+          cache: "no-store",
+        });
+        if (jobsResponse.ok) {
+          const jobs = (await jobsResponse.json()) as TextOverlayJobRecord[];
+          const byVideoId: Record<
+            string,
+            {
+              status: string;
+              outputVideoPath: string;
+              overlayResultStatus: string;
+            }
+          > = {};
+          if (Array.isArray(jobs)) {
+            jobs.forEach((job) => {
+              const id = String(job.video_id || "").trim();
+              if (!id || byVideoId[id]) return;
+              byVideoId[id] = {
+                status: String(job.status || "").toLowerCase(),
+                outputVideoPath: String(job.output_video_path || "").trim(),
+                overlayResultStatus: String(job.overlay_result_status || "").toLowerCase(),
+              };
+            });
+          }
+          setTextOverlayByVideoId(byVideoId);
+        } else {
+          setTextOverlayByVideoId({});
+        }
+      } catch {
+        setTextOverlayByVideoId({});
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load videos.");
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchVideos();
+  }, [fetchVideos]);
+
+  const handleRetry = useCallback(
+    async (videoId: string) => {
+      setRetrying((prev) => ({ ...prev, [videoId]: true }));
+      setError(null);
+
+      try {
+        const response = await fetch(`${API_BASE}/videos/${videoId}/retry`, {
+          method: "POST",
+        });
+        const payload = (await response.json().catch(() => null)) as
+          | VideoEnqueueResponse
+          | null;
+        if (!response.ok) {
+          throw new Error(
+            payload?.detail ??
+              payload?.message ??
+              `Unable to retry video (${response.status})`
+          );
+        }
+
+        if (payload?.video?.video_id === videoId) {
+          setVideos((prev) =>
+            prev.map((video) =>
+              video.video_id === videoId ? payload.video ?? video : video
+            )
+          );
+        } else {
+          await fetchVideos();
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Unable to retry video.");
+      } finally {
+        setRetrying((prev) => {
+          const next = { ...prev };
+          delete next[videoId];
+          return next;
+        });
+      }
+    },
+    [fetchVideos]
+  );
+
+  const handleDelete = useCallback(
+    async (videoId: string) => {
+      const confirmed = window.confirm(
+        "Delete this video? This removes the video record and associated files."
+      );
+      if (!confirmed) return;
+
+      setDeleting((prev) => ({ ...prev, [videoId]: true }));
+      setError(null);
+
+      try {
+        const response = await fetch(`${API_BASE}/videos/${videoId}`, {
+          method: "DELETE",
+        });
+        if (!response.ok) {
+          throw new Error(`Unable to delete video (${response.status})`);
+        }
+        setVideos((prev) => prev.filter((video) => video.video_id !== videoId));
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Unable to delete video.");
+      } finally {
+        setDeleting((prev) => {
+          const next = { ...prev };
+          delete next[videoId];
+          return next;
+        });
+      }
+    },
+    []
+  );
+
+  const grouped = useMemo(() => {
+    const created: VideoRecord[] = [];
+    const failed: VideoRecord[] = [];
+    const attempted: VideoRecord[] = [];
+
+    sortByRecent(videos).forEach((video) => {
+      const normalized = normalizeStatus(video.status);
+      if (normalized === "failed") {
+        failed.push(video);
+      } else if (normalized === "created") {
+        created.push(video);
+      } else {
+        attempted.push(video);
+      }
+    });
+
+    return { created, failed, attempted };
+  }, [videos]);
+
+  return (
+    <div className="mx-auto flex w-full max-w-6xl flex-col gap-10">
+      <section className="neon-panel rounded-3xl p-6 md:p-8">
+        <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
+          <div className="space-y-3">
+            <span className="neon-pill">Video vault</span>
+            <h1 className="font-display text-3xl font-semibold sm:text-4xl">
+              Recent reels
+            </h1>
+            <p className="text-muted">
+              Monitor everything you created, failed runs, and all attempted
+              renders in one place.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-3">
+            <span className="neon-chip">{videos.length} total</span>
+            <span className="neon-chip">{grouped.created.length} created</span>
+            <span className="neon-chip">{grouped.attempted.length} attempted</span>
+            <span className="neon-chip">{grouped.failed.length} failed</span>
+          </div>
+        </div>
+        <div className="mt-6 flex flex-wrap gap-3">
+          <button
+            className="neon-button neon-button-ghost"
+            type="button"
+            onClick={fetchVideos}
+            disabled={isLoading}
+          >
+            {isLoading ? "Refreshing..." : "Refresh"}
+          </button>
+          <Link className="neon-button neon-button-primary" href="/create_video">
+            Create Video
+          </Link>
+        </div>
+        {error && <div className="alert alert-error mt-4">{error}</div>}
+      </section>
+
+      <section className="neon-panel rounded-3xl p-5">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div>
+            <p className="text-sm font-semibold uppercase tracking-[0.3em] text-soft">
+              All videos
+            </p>
+            <p className="text-xs text-muted">
+              Sorted by the most recent update.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2 text-xs text-muted">
+            <span className="neon-chip">{grouped.created.length} created</span>
+            <span className="neon-chip">
+              {grouped.attempted.length} attempted
+            </span>
+            <span className="neon-chip">{grouped.failed.length} failed</span>
+          </div>
+        </div>
+
+        <div className="mt-5 overflow-x-auto">
+          {videos.length === 0 ? (
+            <p className="text-sm text-soft">
+              {isLoading ? "Loading videos..." : "No created videos yet."}
+            </p>
+          ) : (
+            <table className="min-w-full text-left text-sm">
+              <thead className="table-head text-xs uppercase tracking-[0.3em]">
+                <tr>
+                  <th className="py-3 pr-6">Title</th>
+                  <th className="py-3 pr-6">Status</th>
+                  <th className="py-3 pr-6">Size</th>
+                  <th className="py-3 pr-6">Updated</th>
+                  <th className="py-3 pr-6">Output / Error</th>
+                  <th className="py-3 pr-6">Text Overlay</th>
+                  <th className="py-3 pr-6">Retry</th>
+                  <th className="py-3">Delete</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortByRecent(videos).map((video) => {
+                  const overlayMeta = textOverlayByVideoId[video.video_id];
+                  const isOverlayDone = overlayMeta?.status === "finished";
+                  const hasOverlayOutput =
+                    Boolean(overlayMeta?.outputVideoPath) &&
+                    overlayMeta?.overlayResultStatus === "success";
+                  const downloadPath = isOverlayDone && hasOverlayOutput
+                    ? `${API_BASE}/videos/${encodeURIComponent(
+                        video.video_id
+                      )}/text-overlays/download`
+                    : `${API_BASE}/videos/${encodeURIComponent(
+                        video.video_id
+                      )}/download`;
+                  const shownFilePath =
+                    isOverlayDone && hasOverlayOutput
+                      ? overlayMeta.outputVideoPath
+                      : String(video.output_file_location || "").trim();
+
+                  return (
+                    <tr key={video.video_id} className="table-row">
+                      <td className="py-4 pr-6 align-top">
+                        <p className="text-base font-semibold">
+                          {video.video_title || "Untitled video"}
+                        </p>
+                        {video.video_introduction && (
+                          <p className="mt-1 max-w-[260px] text-xs text-muted">
+                            {video.video_introduction}
+                          </p>
+                        )}
+                      </td>
+                      <td className="py-4 pr-6 align-top">
+                        <StatusPill status={video.status} />
+                      </td>
+                      <td className="py-4 pr-6 align-top text-xs text-muted">
+                        {video.video_size ? String(video.video_size) : "—"}
+                      </td>
+                      <td className="py-4 pr-6 align-top text-xs text-soft">
+                        {formatDateTime(
+                          video.modification_time ?? video.creation_time
+                        )}
+                      </td>
+                      <td className="py-4 align-top text-xs text-muted">
+                        {video.error_reason ? (
+                          <span className="text-status-error">
+                            Error: {video.error_reason}
+                          </span>
+                        ) : normalizeStatus(video.status) === "completed" &&
+                          shownFilePath ? (
+                          <div className="space-y-1">
+                            <a
+                              className="theme-link"
+                              href={downloadPath}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              Download
+                            </a>
+                            <span
+                              className="block max-w-[220px] truncate text-soft"
+                              title={shownFilePath}
+                            >
+                              {fileNameFromPath(shownFilePath)}
+                            </span>
+                          </div>
+                        ) : video.output_file_location ? (
+                          <span className="text-soft">Processing output…</span>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                      <td className="py-4 pr-6 align-top text-xs">
+                        <Link
+                          className="theme-link"
+                          href={`/create-text-overlay/${encodeURIComponent(
+                            video.video_id
+                          )}`}
+                        >
+                          {isOverlayDone ? "Edit" : overlayMeta ? "Open" : "Create"}
+                        </Link>
+                      </td>
+                      <td className="py-4 pr-6 align-top text-xs">
+                        {normalizeStatus(video.status) === "failed" ? (
+                          <button
+                            className="theme-link disabled:cursor-not-allowed disabled:opacity-60"
+                            type="button"
+                            onClick={() => handleRetry(video.video_id)}
+                            disabled={Boolean(retrying[video.video_id])}
+                          >
+                            {retrying[video.video_id] ? "Retrying..." : "Retry"}
+                          </button>
+                        ) : (
+                          <span className="text-soft">—</span>
+                        )}
+                      </td>
+                      <td className="py-4 align-top text-xs">
+                        <button
+                          className="theme-link-danger disabled:cursor-not-allowed disabled:opacity-60"
+                          type="button"
+                          onClick={() => handleDelete(video.video_id)}
+                          disabled={Boolean(deleting[video.video_id])}
+                        >
+                          {deleting[video.video_id] ? "Deleting..." : "Delete"}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}

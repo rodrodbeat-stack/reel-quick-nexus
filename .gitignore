@@ -1,0 +1,15 @@
+.env
+*.local.env
+docker/backend.env
+docker/mongo.env
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+frontend/.next/
+frontend/node_modules/
+outputs/
+uploads/
+logs/
+*.log
