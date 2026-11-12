@@ -1,0 +1,94 @@
+name: Import upstream Reel Quick
+
+on:
+  push:
+    paths:
+      - ".github/workflows/import-original.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: import-reel-quick
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout destination repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Clone original project
+        run: |
+          git clone --depth 1 https://github.com/ronin1770/reel-quick.git /tmp/reel-quick-upstream
+
+      - name: Import source while preserving destination automation
+        run: |
+          rsync -a --delete \
+            --exclude='.git/' \
+            --exclude='.github/workflows/import-original.yml' \
+            --exclude='.github/CHATGPT-GITHUB-CONNECTION-TEST.md' \
+            /tmp/reel-quick-upstream/ ./
+
+      - name: Remove local-only environment files and add safe templates
+        run: |
+          rm -f docker/backend.env docker/mongo.env .env
+          cat > docker/backend.env.example <<'EOF'
+          MONGODB_URI=mongodb://mongo:27017
+          REDIS_URL=redis://redis:6379/1
+          OUTPUT_FILES_LOCATION=/app/outputs
+          UPLOAD_FILES_LOCATION=/app/uploads
+          INPUT_FILES_LOCATION=/app/inputs
+          LOG_LOCATION=/app/logs/reel_quick.log
+          EOF
+          cat > docker/mongo.env.example <<'EOF'
+          # Optional MongoDB credentials. Configure secrets outside version control.
+          # MONGO_INITDB_ROOT_USERNAME=change-me
+          # MONGO_INITDB_ROOT_PASSWORD=change-me
+          EOF
+          cat > .gitignore <<'EOF'
+          .env
+          *.local.env
+          docker/backend.env
+          docker/mongo.env
+          __pycache__/
+          *.py[cod]
+          .venv/
+          venv/
+          node_modules/
+          frontend/.next/
+          frontend/node_modules/
+          outputs/
+          uploads/
+          logs/
+          *.log
+          EOF
+
+      - name: Validate Python source
+        run: |
+          python -m compileall -q backend
+
+      - name: Validate frontend manifest
+        run: |
+          node -e "const p=require('./frontend/package.json'); if(!p.scripts || !p.scripts.build) process.exit(1); console.log('Frontend manifest OK')"
+
+      - name: Validate Docker Compose configuration
+        run: |
+          cp docker/backend.env.example docker/backend.env
+          docker compose -f docker/docker-compose.yml config --quiet
+
+      - name: Commit imported application
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No upstream changes to import."
+          else
+            git commit -m "feat: import Reel Quick full-stack application"
+            git push
+          fi
