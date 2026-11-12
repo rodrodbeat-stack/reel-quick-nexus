@@ -31,6 +31,20 @@ jobs:
         run: |
           docker compose -f docker/docker-compose.yml up -d --build mongo redis api frontend nginx
 
+      - name: Start background workers
+        run: |
+          docker compose -f docker/docker-compose.yml up -d worker-video worker-post worker-ai worker-text-overlay
+          sleep 10
+          running="$(docker compose -f docker/docker-compose.yml ps --services --filter status=running)"
+          for service in worker-video worker-post worker-ai worker-text-overlay; do
+            echo "$running" | grep -qx "$service" || {
+              echo "Worker did not remain running: $service"
+              docker compose -f docker/docker-compose.yml logs --no-color --tail=100 "$service"
+              exit 1
+            }
+          done
+          echo "All four background workers are running."
+
       - name: Wait for API and frontend
         run: |
           set -eu
