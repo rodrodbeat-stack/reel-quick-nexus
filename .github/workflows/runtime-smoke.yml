@@ -1,0 +1,56 @@
+name: Runtime smoke test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare local environment files
+        run: |
+          cp docker/backend.env.example docker/backend.env
+          cp docker/mongo.env.example docker/mongo.env
+
+      - name: Validate Compose configuration
+        run: docker compose -f docker/docker-compose.yml config --quiet
+
+      - name: Build and start core stack
+        run: |
+          docker compose -f docker/docker-compose.yml up -d --build mongo redis api frontend nginx
+
+      - name: Wait for API and frontend
+        run: |
+          set -eu
+          for attempt in $(seq 1 60); do
+            api_code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/docs || true)
+            web_code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/ || true)
+            if [ "$api_code" = "200" ] && [ "$web_code" = "200" ]; then
+              echo "API docs and frontend are responding."
+              exit 0
+            fi
+            echo "Waiting for services (API=$api_code, frontend=$web_code)..."
+            sleep 5
+          done
+          docker compose -f docker/docker-compose.yml ps
+          docker compose -f docker/docker-compose.yml logs --no-color --tail=120 api frontend nginx mongo redis
+          exit 1
+
+      - name: Show service status
+        if: always()
+        run: docker compose -f docker/docker-compose.yml ps
+
+      - name: Collect logs on failure
+        if: failure()
+        run: docker compose -f docker/docker-compose.yml logs --no-color --tail=200
+
+      - name: Stop stack
+        if: always()
+        run: docker compose -f docker/docker-compose.yml down -v
