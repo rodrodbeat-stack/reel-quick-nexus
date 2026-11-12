@@ -2,6 +2,11 @@ name: Runtime smoke test
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'docker/**'
+      - '.github/workflows/runtime-smoke.yml'
 
 permissions:
   contents: read
